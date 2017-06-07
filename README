@@ -1,1 +1,6 @@
 # Full Trace Base on memval_sample
+
+# How to build
+1.git clone Dynamorio
+2.replace the memval_sample.c with the file
+3.cmake && make -j
