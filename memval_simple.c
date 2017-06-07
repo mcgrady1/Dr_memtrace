@@ -117,18 +117,18 @@ event_module_load(void *drcontext, const module_data_t *info, bool loaded) {
 }
 
 /* Requires that hex_buf be at least as long as 2*memref->size + 1. */
-// static char *
-// write_hexdump(char *hex_buf, byte *write_base, mem_ref_t *mem_ref)
-// {
-//     int i;
-//     char *hexstring = hex_buf, *needle = hex_buf;
+static char *
+write_hexdump(char *hex_buf, byte *write_base, mem_ref_t *mem_ref)
+{
+    int i;
+    char *hexstring = hex_buf, *needle = hex_buf;
 
-//     for (i = mem_ref->size - 1; i >= 0; --i) {
-//         needle += dr_snprintf(needle, 2*mem_ref->size+1-(needle-hex_buf),
-//                               "%02x", write_base[i]);
-//     }
-//     return hexstring;
-// }
+    for (i = mem_ref->size - 1; i >= 0; --i) {
+        needle += dr_snprintf(needle, 2*mem_ref->size+1-(needle-hex_buf),
+                              "%02x", write_base[i]);
+    }
+    return hexstring;
+}
 
 /* Called when the trace buffer has filled up, and needs to be flushed to disk. */
 static void
@@ -160,10 +160,10 @@ trace_fault(void *drcontext, void *buf_base, size_t size)
          * that a binary dump is *much* faster than fprintf still.
          */
         if (mem_ref->write == 1) {
-            fprintf(data->logf, "%1d "PFX" %s %2d\n",
+            fprintf(data->logf, "%1d "PFX" %s %2d %s\n",
                     mem_ref->write,
                     (ptr_uint_t)mem_ref->addr, decode_opcode_name(mem_ref->type),
-                    mem_ref->size);
+                    mem_ref->size, write_hexdump(hex_buf, write_base, mem_ref));
             fflush(stdout);
             write_base += mem_ref->size;
             DR_ASSERT(write_base <= write_ptr);
@@ -414,10 +414,10 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
         return DR_EMIT_DEFAULT;
     }
 
-    if (instr_get_app_pc(instr) != NULL) {
-        opnd_t tmp_opnd;
-        *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
-    }
+    // if (instr_get_app_pc(instr) != NULL) {
+    //     opnd_t tmp_opnd;
+    //     *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
+    // }
 
     return DR_EMIT_DEFAULT;
 }
