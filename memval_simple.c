@@ -62,6 +62,7 @@
 #include "drreg.h"
 #include "utils.h"
 #include "drx.h"
+#include <string.h>
 
 /* We opt to use two buffers -- one to hold only mem_ref_t structs, and another to hold
  * the raw bytes written. This is done for simplicity, as we will never get a partial
@@ -71,10 +72,9 @@ typedef struct _mem_ref_t {
     ushort write; /* mem write or read */
     ushort size;  /* mem ref size */
     ushort type;  /* instr opcode */
+    app_pc pc  ;
     app_pc addr;  /* mem ref addr */
 } mem_ref_t;
-
-bool bf = false; /* begin record flag */
 
 /* Max number of mem_ref a buffer can have. */
 #define MAX_NUM_MEM_REFS 4096
@@ -100,6 +100,9 @@ static int         tls_idx;
 static drx_buf_t  *write_buffer;
 static drx_buf_t  *trace_buffer;
 
+static unsigned int ms = 0;
+static unsigned int me = 0;
+
 /* Get baseaddress of module */
 static void
 event_module_load(void *drcontext, const module_data_t *info, bool loaded) {
@@ -112,8 +115,12 @@ event_module_load(void *drcontext, const module_data_t *info, bool loaded) {
         return;
     }
 
-    fprintf(data->logf, "[MODUL] mn:%s ms:0x%016lx me:0x%016lx\n", 
+    fprintf(data->logf, "[MODUL] mn:%s ms:0x%08x me:0x%08x\n", 
             module_name, (ptr_uint_t)info->start, (ptr_uint_t)info->end);
+    if ((ptr_uint_t)info->start == 0x8048000) {
+        ms = (ptr_uint_t)info->start;
+        me = (ptr_uint_t)info->end;
+    }
 }
 
 /* Requires that hex_buf be at least as long as 2*memref->size + 1. */
@@ -160,8 +167,8 @@ trace_fault(void *drcontext, void *buf_base, size_t size)
          * that a binary dump is *much* faster than fprintf still.
          */
         if (mem_ref->write == 1) {
-            fprintf(data->logf, "%1d "PFX" %s %2d %s\n",
-                    mem_ref->write,
+            fprintf(data->logf, PFX" %1d "PFX" %s %d %s\n",
+                    (ptr_uint_t)mem_ref->pc, mem_ref->write,
                     (ptr_uint_t)mem_ref->addr, decode_opcode_name(mem_ref->type),
                     mem_ref->size, write_hexdump(hex_buf, write_base, mem_ref));
             fflush(stdout);
@@ -169,8 +176,8 @@ trace_fault(void *drcontext, void *buf_base, size_t size)
             DR_ASSERT(write_base <= write_ptr);
         }
         else {
-            fprintf(data->logf, "%1d "PFX" %s %2d %s\n",
-                    mem_ref->write,
+            fprintf(data->logf, PFX" %1d "PFX" %s %d %s\n",
+                    (ptr_uint_t)mem_ref->pc, mem_ref->write,
                     (ptr_uint_t)mem_ref->addr, decode_opcode_name(mem_ref->type),
                     mem_ref->size, "0");
             fflush(stdout);
@@ -189,6 +196,7 @@ instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,b
     reg_id_t reg_ptr, reg_tmp, reg_addr;
     ushort type, size, write;
     bool ok;
+    app_pc pc;
 
     if (iswrite == true) write = 1;
     else write = 0;
@@ -204,15 +212,40 @@ instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,b
         return DR_REG_NULL;
     }
 
+    /* i#2449: In the situation that instrument_post_write, instrument_mem and ref all
+     * have the same register reserved, drutil_insert_get_mem_addr will compute the
+     * address of an operand using an incorrect register value, as drreg will elide the
+     * save/restore.
+     */
+    if (opnd_uses_reg(ref, reg_tmp) &&
+        drreg_get_app_value(drcontext, ilist, where, reg_tmp, reg_tmp)
+        != DRREG_SUCCESS) {
+        DR_ASSERT(false);
+        return DR_REG_NULL;
+    }
+    if (opnd_uses_reg(ref, reg_ptr) &&
+        drreg_get_app_value(drcontext, ilist, where, reg_ptr, reg_ptr)
+        != DRREG_SUCCESS) {
+        DR_ASSERT(false);
+        return DR_REG_NULL;
+    }
+
     /* We use reg_ptr as scratch to get addr. Note we do this first as reg_ptr or reg_tmp
      * may be used in ref.
      */
+
     if (ismem == true) {
         ok = drutil_insert_get_mem_addr(drcontext, ilist, where, ref, reg_tmp, reg_ptr);
         DR_ASSERT(ok);
     }
     
     drx_buf_insert_load_buf_ptr(drcontext, trace_buffer, ilist, where, reg_ptr);
+
+    /* inserts pc */
+    pc = instr_get_app_pc(where);
+    drx_buf_insert_buf_store(drcontext, trace_buffer, ilist, where, reg_ptr, DR_REG_NULL, 
+                             OPND_CREATE_INTPTR((ptr_int_t)pc), OPSZ_PTR, 
+                             offsetof(mem_ref_t, pc));
 
     if (ismem == true)
         /* inserts memref addr */
@@ -262,7 +295,7 @@ instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,b
 
     if (write == 1) {
         if (instr_is_call(where)) {
-            app_pc pc;
+            
 
             /* Note that on ARM the call instruction writes only to the link register, so
              * we would never even get into instrument_mem() on ARM if this was a call.
@@ -381,6 +414,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
     int i;
     reg_id_t *reg_next = (reg_id_t *)user_data;
     bool seen_memref = false;
+    bool rf = false; //read flag
 
     /* If the previous instruction was a write, we should handle it. */
     if (*reg_next != DR_REG_NULL)
@@ -395,12 +429,12 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
         for (i = 0; i < instr_num_srcs(instr); ++i) {
             if (opnd_is_memory_reference(instr_get_src(instr, i))) {
                 *reg_next = instrument_mem(drcontext, bb, instr, instr_get_src(instr, i), true, false);
+                rf = true;
             }
         }
     }
     
     if (instr_writes_memory(instr)) {
-        bf = true;
         /* XXX: See above, in handle_post_write(). To simplify the handling of registers, we
          * assume no instruction has multiple distinct memory destination operands.
          */
@@ -414,10 +448,35 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
         return DR_EMIT_DEFAULT;
     }
 
-    // if (instr_get_app_pc(instr) != NULL) {
-    //     opnd_t tmp_opnd;
-    //     *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
-    // }
+    if (rf == true) return DR_EMIT_DEFAULT;
+
+    if (instr_get_app_pc(instr) != NULL) {
+        if (strstr(decode_opcode_name(instr_get_opcode(instr)),"call") != NULL) {
+            opnd_t tmp_opnd;
+            *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
+            return DR_EMIT_DEFAULT;
+        }
+
+        if (strstr(decode_opcode_name(instr_get_opcode(instr)),"ret") != NULL) {
+            opnd_t tmp_opnd;
+            *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
+            return DR_EMIT_DEFAULT;
+        }
+
+        // app_pc pc = instr_get_app_pc(instr);
+        // ushort type = instr_get_opcode(instr);
+        // if ((ptr_uint_t)pc < me && (ptr_uint_t)pc > ms && me != 0) {
+        //     if (strstr(decode_opcode_name(instr_get_opcode(instr)),"loop") != NULL) {
+        //         return DR_EMIT_DEFAULT;
+        //     }
+
+        //     printf("%08x, %s, %08x\n", (ptr_uint_t)pc, decode_opcode_name(type), me);
+        //     opnd_t tmp_opnd;
+        //     *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
+        //     return DR_EMIT_DEFAULT;
+        // }
+
+    }
 
     return DR_EMIT_DEFAULT;
 }
