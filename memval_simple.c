@@ -104,6 +104,15 @@ static drx_buf_t  *trace_buffer;
 static unsigned int ms = 0;
 static unsigned int me = 0;
 
+/* filter rep instruction */
+// static bool
+// opc_is_stringop_loop(uint opc)
+// {
+//     return (opc == OP_rep_ins || opc == OP_rep_outs || opc == OP_rep_movs ||
+//             opc == OP_rep_stos || opc == OP_rep_lods || opc == OP_rep_cmps ||
+//             opc == OP_repne_cmps || opc == OP_rep_scas || opc == OP_repne_scas);
+// }
+
 /* Get baseaddress of module */
 static void
 event_module_load(void *drcontext, const module_data_t *info, bool loaded) {
@@ -115,6 +124,9 @@ event_module_load(void *drcontext, const module_data_t *info, bool loaded) {
         fprintf(data->logf, "[MODUL] Module_Loaded_Fault \n");
         return;
     }
+
+    // dr_printf("[MODUL] mn:%s ms:0x%08x me:0x%08x\n", 
+    //         module_name, (ptr_uint_t)info->start, (ptr_uint_t)info->end);
 
     fprintf(data->logf, "[MODUL] mn:%s ms:0x%08x me:0x%08x\n", 
             module_name, (ptr_uint_t)info->start, (ptr_uint_t)info->end);
@@ -130,13 +142,13 @@ write_hexdump(char *hex_buf, byte *write_base, mem_ref_t *mem_ref, int isopcode)
 {
     int i;
     char *hexstring = hex_buf, *needle = hex_buf;
-
+    
     if (!isopcode) {
         for (i = mem_ref->size - 1; i >= 0; --i) {
             needle += dr_snprintf(needle, 2*mem_ref->size+1-(needle-hex_buf),
                                   "%02x", write_base[i]);
         }
-        return hexstring;
+
     }
     else {
 
@@ -145,8 +157,9 @@ write_hexdump(char *hex_buf, byte *write_base, mem_ref_t *mem_ref, int isopcode)
                                   "%02x", write_base[i]);
         }
 
-        return hexstring;
     }
+
+    return hexstring;
     
 }
 
@@ -189,23 +202,30 @@ trace_fault(void *drcontext, void *buf_base, size_t size)
          */
 
         if (mem_ref->write == 1) {
-            fprintf(data->logf, PFX" %d %s %1d "PFX" %s %d %s\n",
+            fprintf(data->logf, PFX" %d %s %1d "PFX" %s %d ",
                     (ptr_uint_t)mem_ref->pc, mem_ref->instr_size, 
                     write_hexdump(hex_buf, (byte *)mem_ref->pc, mem_ref, 1),
                     mem_ref->write,
                     (ptr_uint_t)mem_ref->addr, decode_opcode_name(mem_ref->type),
-                    mem_ref->size, write_hexdump(hex_buf, write_base, mem_ref, 0));
+                    mem_ref->size);
+            fprintf(data->logf, "%s\n", write_hexdump(hex_buf, write_base, mem_ref, 0));
             fflush(stdout);
             write_base += mem_ref->size;
             DR_ASSERT(write_base <= write_ptr);
         }
         else {
-            fprintf(data->logf, PFX" %d %s %1d "PFX" %s %d %s\n",
+            fprintf(data->logf, PFX" %d %s %1d "PFX" %s %d ",
                     (ptr_uint_t)mem_ref->pc, mem_ref->instr_size, 
                     write_hexdump(hex_buf, (byte *)mem_ref->pc, mem_ref, 1),
                     mem_ref->write,
                     (ptr_uint_t)mem_ref->addr, decode_opcode_name(mem_ref->type),
-                    mem_ref->size, "0");
+                    mem_ref->size);
+            if (mem_ref->size > 0) {
+                fprintf(data->logf, "%s\n", write_hexdump(hex_buf, write_base, mem_ref, 0));
+                write_base += mem_ref->size;
+            }
+            else
+                fprintf(data->logf, "0\n");
             fflush(stdout);
         }
 
@@ -246,17 +266,25 @@ instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,b
      * address of an operand using an incorrect register value, as drreg will elide the
      * save/restore.
      */
-    if (opnd_uses_reg(ref, reg_tmp) &&
-        drreg_get_app_value(drcontext, ilist, where, reg_tmp, reg_tmp)
-        != DRREG_SUCCESS) {
-        DR_ASSERT(false);
-        return DR_REG_NULL;
-    }
-    if (opnd_uses_reg(ref, reg_ptr) &&
-        drreg_get_app_value(drcontext, ilist, where, reg_ptr, reg_ptr)
-        != DRREG_SUCCESS) {
-        DR_ASSERT(false);
-        return DR_REG_NULL;
+
+    // dr_printf("0x%08x %s\n", instr_get_app_pc(where), decode_opcode_name(instr_get_opcode(where)));
+
+    // dr_printf("condition %d\n", opnd_uses_reg(ref, reg_tmp));
+    // dr_printf("condition %d\n", drreg_get_app_value(drcontext, ilist, where, reg_tmp, reg_tmp) != DRREG_SUCCESS);
+
+    if (ismem) {
+        if (opnd_uses_reg(ref, reg_tmp) &&
+            drreg_get_app_value(drcontext, ilist, where, reg_tmp, reg_tmp)
+            != DRREG_SUCCESS) {
+            DR_ASSERT(false);
+            return DR_REG_NULL;
+        }
+        if (opnd_uses_reg(ref, reg_ptr) &&
+            drreg_get_app_value(drcontext, ilist, where, reg_ptr, reg_ptr)
+            != DRREG_SUCCESS) {
+            DR_ASSERT(false);
+            return DR_REG_NULL;
+        }
     }
 
     /* We use reg_ptr as scratch to get addr. Note we do this first as reg_ptr or reg_tmp
@@ -367,6 +395,18 @@ instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,b
         return reg_tmp;
     }
     else {
+        if (ismem == true) {
+
+            ushort stride = (ushort)drutil_opnd_mem_size_in_bytes(ref, where);
+
+            ok = drutil_insert_get_mem_addr(drcontext, ilist, where, ref, reg_tmp, reg_ptr);
+            DR_ASSERT(ok);
+
+            drx_buf_insert_load_buf_ptr(drcontext, write_buffer, ilist, where, reg_ptr);
+            /* drx_buf_insert_memcpy() internally updates the buffer pointer */
+            drx_buf_insert_buf_memcpy(drcontext, write_buffer, ilist, where, reg_ptr, reg_tmp, stride);
+
+        }
         if (drreg_unreserve_register(drcontext, ilist, where, reg_tmp) != DRREG_SUCCESS)
                 DR_ASSERT(false);
 
@@ -454,10 +494,14 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
     /* If the previous instruction was a write, we should handle it. */
     if (*reg_next != DR_REG_NULL)
         handle_post_write(drcontext, bb, instr, *reg_next);
+
     *reg_next = DR_REG_NULL;
 
     if (!instr_is_app(instr))
         return DR_EMIT_DEFAULT;
+
+    // if (opc_is_stringop_loop(instr_get_opcode(instr)))
+    //     return DR_EMIT_DEFAULT;
 
     if (instr_reads_memory(instr)) {
 
@@ -486,17 +530,31 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
     if (rf == true) return DR_EMIT_DEFAULT;
 
     if (instr_get_app_pc(instr) != NULL) {
-        if (strstr(decode_opcode_name(instr_get_opcode(instr)),"call") != NULL) {
-            opnd_t tmp_opnd;
-            *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
-            return DR_EMIT_DEFAULT;
-        }
+        // if (strstr(decode_opcode_name(instr_get_opcode(instr)),"call") != NULL) {
+        //     opnd_t tmp_opnd;
+        //     *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
+        //     return DR_EMIT_DEFAULT;
+        // }
 
-        if (strstr(decode_opcode_name(instr_get_opcode(instr)),"ret") != NULL) {
-            opnd_t tmp_opnd;
-            *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
-            return DR_EMIT_DEFAULT;
-        }
+        // if (strstr(decode_opcode_name(instr_get_opcode(instr)),"ret") != NULL) {
+        //     opnd_t tmp_opnd;
+        //     *reg_next = instrument_mem(drcontext, bb, instr, tmp_opnd, false, false);
+        //     return DR_EMIT_DEFAULT;
+        // }
+
+        // if (instr_num_srcs(instr) == 0 && instr_num_dsts(instr) == 0) return DR_EMIT_DEFAULT;
+        // // opnd_t tmp_opnd;
+
+        // //dr_printf("0x%08x %s\n", instr_get_app_pc(instr), decode_opcode_name(instr_get_opcode(instr)));
+        // if (instr_num_srcs(instr) > 0) {
+        //     *reg_next = instrument_mem(drcontext, bb, instr, instr_get_src(instr, 0), false, false);
+        //     return DR_EMIT_DEFAULT;
+        // }
+        // else {
+        //     *reg_next = instrument_mem(drcontext, bb, instr, instr_get_dst(instr, 0), false, false);
+        //     return DR_EMIT_DEFAULT;
+        // }
+        
 
         // app_pc pc = instr_get_app_pc(instr);
         // ushort type = instr_get_opcode(instr);
@@ -527,6 +585,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb,
         DR_ASSERT(false);
         /* in release build, carry on: we'll just miss per-iter refs */
     }
+
     drx_tail_pad_block(drcontext, bb);
     return DR_EMIT_DEFAULT;
 }
