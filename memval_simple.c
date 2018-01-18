@@ -72,6 +72,7 @@ typedef struct _mem_ref_t {
     ushort write; /* mem write or read */
     ushort size;  /* mem ref size */
     ushort type;  /* instr opcode */
+    ushort instr_size; /* size of instr */
     app_pc pc  ;
     app_pc addr;  /* mem ref addr */
 } mem_ref_t;
@@ -125,16 +126,28 @@ event_module_load(void *drcontext, const module_data_t *info, bool loaded) {
 
 /* Requires that hex_buf be at least as long as 2*memref->size + 1. */
 static char *
-write_hexdump(char *hex_buf, byte *write_base, mem_ref_t *mem_ref)
+write_hexdump(char *hex_buf, byte *write_base, mem_ref_t *mem_ref, int isopcode)
 {
     int i;
     char *hexstring = hex_buf, *needle = hex_buf;
 
-    for (i = mem_ref->size - 1; i >= 0; --i) {
-        needle += dr_snprintf(needle, 2*mem_ref->size+1-(needle-hex_buf),
-                              "%02x", write_base[i]);
+    if (!isopcode) {
+        for (i = mem_ref->size - 1; i >= 0; --i) {
+            needle += dr_snprintf(needle, 2*mem_ref->size+1-(needle-hex_buf),
+                                  "%02x", write_base[i]);
+        }
+        return hexstring;
     }
-    return hexstring;
+    else {
+
+        for (i = 0; i < mem_ref->instr_size; i++) {
+            needle += dr_snprintf(needle, 2*mem_ref->instr_size+1-(needle-hex_buf),
+                                  "%02x", write_base[i]);
+        }
+
+        return hexstring;
+    }
+    
 }
 
 /* Called when the trace buffer has filled up, and needs to be flushed to disk. */
@@ -147,15 +160,23 @@ trace_fault(void *drcontext, void *buf_base, size_t size)
     byte *write_base = drx_buf_get_buffer_base(drcontext, write_buffer);
     byte *write_ptr  = drx_buf_get_buffer_ptr (drcontext, write_buffer);
     int largest_size = 0;
+    int largest_instr_size = 0;
     mem_ref_t *mem_ref;
     char *hex_buf;
+    // char *opcode_buf;
 
     /* find the largest necessary buffer so we only perform a single allocation */
     for (mem_ref = trace_base; mem_ref < trace_ptr; mem_ref++) {
         if (mem_ref->size > largest_size)
             largest_size = mem_ref->size;
+        if (mem_ref->instr_size > largest_instr_size)
+            largest_instr_size = mem_ref->instr_size;
     }
+
+    if (largest_size < largest_instr_size) largest_size = largest_instr_size;
+
     hex_buf = dr_thread_alloc(drcontext, 2*largest_size+1);
+    // opcode_buf = dr_thread_alloc(drcontext, 2*largest_instr_size+1);
     /* write the memrefs to disk */
     for (mem_ref = trace_base; mem_ref < trace_ptr; mem_ref++) {
         /* Each memref in the trace buffer has an "associated" write in the write buffer.
@@ -166,25 +187,33 @@ trace_fault(void *drcontext, void *buf_base, size_t size)
          * repeated printing that dominates performance, as the printing does here. Note
          * that a binary dump is *much* faster than fprintf still.
          */
+
         if (mem_ref->write == 1) {
-            fprintf(data->logf, PFX" %1d "PFX" %s %d %s\n",
-                    (ptr_uint_t)mem_ref->pc, mem_ref->write,
+            fprintf(data->logf, PFX" %d %s %1d "PFX" %s %d %s\n",
+                    (ptr_uint_t)mem_ref->pc, mem_ref->instr_size, 
+                    write_hexdump(hex_buf, (byte *)mem_ref->pc, mem_ref, 1),
+                    mem_ref->write,
                     (ptr_uint_t)mem_ref->addr, decode_opcode_name(mem_ref->type),
-                    mem_ref->size, write_hexdump(hex_buf, write_base, mem_ref));
+                    mem_ref->size, write_hexdump(hex_buf, write_base, mem_ref, 0));
             fflush(stdout);
             write_base += mem_ref->size;
             DR_ASSERT(write_base <= write_ptr);
         }
         else {
-            fprintf(data->logf, PFX" %1d "PFX" %s %d %s\n",
-                    (ptr_uint_t)mem_ref->pc, mem_ref->write,
+            fprintf(data->logf, PFX" %d %s %1d "PFX" %s %d %s\n",
+                    (ptr_uint_t)mem_ref->pc, mem_ref->instr_size, 
+                    write_hexdump(hex_buf, (byte *)mem_ref->pc, mem_ref, 1),
+                    mem_ref->write,
                     (ptr_uint_t)mem_ref->addr, decode_opcode_name(mem_ref->type),
                     mem_ref->size, "0");
             fflush(stdout);
         }
+
         fflush(stdout);
+
     }
     dr_thread_free(drcontext, hex_buf, 2*largest_size+1);
+    // dr_thread_free(drcontext, opcode_buf, 2*largest_size+1);
     /* reset the write buffer (note: the trace buffer gets reset automatically) */
     drx_buf_set_buffer_ptr(drcontext, write_buffer,
                            drx_buf_get_buffer_base(drcontext, write_buffer));
@@ -194,7 +223,7 @@ static reg_id_t
 instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,bool ismem, bool iswrite)
 {
     reg_id_t reg_ptr, reg_tmp, reg_addr;
-    ushort type, size, write;
+    ushort type, size, write, instr_size;
     bool ok;
     app_pc pc;
 
@@ -279,6 +308,12 @@ instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,b
     type = (ushort)instr_get_opcode(where);
     drx_buf_insert_buf_store(drcontext, trace_buffer, ilist, where, reg_ptr, reg_tmp,
                              OPND_CREATE_INT16(type), OPSZ_2, offsetof(mem_ref_t, type));
+
+    /* insert inst_size */
+    instr_size = (ushort)instr_length(drcontext, where);
+    drx_buf_insert_buf_store(drcontext, trace_buffer, ilist, where, reg_ptr, reg_tmp,
+                             OPND_CREATE_INT16(instr_size), OPSZ_2, offsetof(mem_ref_t, instr_size));
+
     /* inserts size */
     if (ismem == true) {
         size = (ushort)drutil_opnd_mem_size_in_bytes(ref, where);
