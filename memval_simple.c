@@ -542,18 +542,18 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
         //     return DR_EMIT_DEFAULT;
         // }
 
-        // if (instr_num_srcs(instr) == 0 && instr_num_dsts(instr) == 0) return DR_EMIT_DEFAULT;
-        // // opnd_t tmp_opnd;
+        if (instr_num_srcs(instr) == 0 && instr_num_dsts(instr) == 0) return DR_EMIT_DEFAULT;
+        // opnd_t tmp_opnd;
 
-        // //dr_printf("0x%08x %s\n", instr_get_app_pc(instr), decode_opcode_name(instr_get_opcode(instr)));
-        // if (instr_num_srcs(instr) > 0) {
-        //     *reg_next = instrument_mem(drcontext, bb, instr, instr_get_src(instr, 0), false, false);
-        //     return DR_EMIT_DEFAULT;
-        // }
-        // else {
-        //     *reg_next = instrument_mem(drcontext, bb, instr, instr_get_dst(instr, 0), false, false);
-        //     return DR_EMIT_DEFAULT;
-        // }
+        //dr_printf("0x%08x %s\n", instr_get_app_pc(instr), decode_opcode_name(instr_get_opcode(instr)));
+        if (instr_num_srcs(instr) > 0) {
+            *reg_next = instrument_mem(drcontext, bb, instr, instr_get_src(instr, 0), false, false);
+            return DR_EMIT_DEFAULT;
+        }
+        else {
+            *reg_next = instrument_mem(drcontext, bb, instr, instr_get_dst(instr, 0), false, false);
+            return DR_EMIT_DEFAULT;
+        }
         
 
         // app_pc pc = instr_get_app_pc(instr);
@@ -577,18 +577,18 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
 /* We transform string loops into regular loops so we can more easily
  * monitor every memory reference they make.
  */
-static dr_emit_flags_t
-event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb,
-                 bool for_trace, bool translating)
-{
-    if (!drutil_expand_rep_string(drcontext, bb)) {
-        DR_ASSERT(false);
-        /* in release build, carry on: we'll just miss per-iter refs */
-    }
+// static dr_emit_flags_t
+// event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb,
+//                  bool for_trace, bool translating)
+// {
+//     if (!drutil_expand_rep_string(drcontext, bb)) {
+//         DR_ASSERT(false);
+//         /* in release build, carry on: we'll just miss per-iter refs */
+//     }
 
-    drx_tail_pad_block(drcontext, bb);
-    return DR_EMIT_DEFAULT;
-}
+//     drx_tail_pad_block(drcontext, bb);
+//     return DR_EMIT_DEFAULT;
+// }
 
 static void
 event_thread_init(void *drcontext)
@@ -627,7 +627,7 @@ event_exit(void)
         !drmgr_unregister_thread_init_event(event_thread_init) ||
         !drmgr_unregister_thread_exit_event(event_thread_exit) ||
         !drmgr_unregister_module_load_event(event_module_load) ||
-        !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
+        // !drmgr_unregister_bb_app2app_event(event_bb_app2app) ||
         !drmgr_unregister_bb_insertion_event(event_app_instruction))
         DR_ASSERT(false);
 
@@ -656,7 +656,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     if (!drmgr_register_thread_init_event(event_thread_init) ||
         !drmgr_register_thread_exit_event(event_thread_exit) ||
         !drmgr_register_module_load_event(event_module_load) ||
-        !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
+        // !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||
         !drmgr_register_bb_instrumentation_event(event_app_analysis,
                                                  event_app_instruction,
                                                  NULL))
